@@ -102,6 +102,8 @@ start_backend() {
     return 0
   fi
   info "Starting backend (uv run scripts/launch.py)..."
+  # Set API_PORT to 8001 to avoid conflict with other services
+  export API_PORT=8001
   cd "$PY_DIR" && uv run --with questionary scripts/launch.py
 }
 

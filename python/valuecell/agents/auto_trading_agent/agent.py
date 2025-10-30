@@ -69,10 +69,14 @@ class AutoTradingAgent(BaseAgent):
 
         try:
             # Parser agent for natural language query parsing
+            # 使用 get_model() 以支持 Qwen/DeepSeek
+            from valuecell.utils.model import get_model
             self.parser_agent = Agent(
-                model=OpenRouter(id=self.parser_model_id),
+                model=get_model("TRADING_PARSER_MODEL_ID"),
                 output_schema=TradingRequest,
                 markdown=True,
+                # 添加 instructions 确保包含 "json" 关键字（通义千问要求）
+                instructions=["Parse the trading request and respond in JSON format."],
             )
             logger.info("Auto Trading Agent initialized successfully")
         except Exception as e:
@@ -136,6 +140,9 @@ class AutoTradingAgent(BaseAgent):
                     llm_client = ai_signal_generator.llm_client
 
                 portfolio_manager = PortfolioDecisionManager(config, llm_client)
+                
+                # Store AI exit plans per symbol for decision history
+                symbol_ai_exit_plans = {}
 
                 for symbol in config.crypto_symbols:
                     # Calculate indicators
@@ -151,7 +158,8 @@ class AutoTradingAgent(BaseAgent):
                     )
 
                     # Generate AI signal if enabled
-                    ai_action, ai_trade_type, ai_reasoning, ai_confidence = (
+                    ai_action, ai_trade_type, ai_reasoning, ai_confidence, ai_exit_plan = (
+                        None,
                         None,
                         None,
                         None,
@@ -166,7 +174,11 @@ class AutoTradingAgent(BaseAgent):
                                 ai_trade_type,
                                 ai_reasoning,
                                 ai_confidence,
+                                ai_exit_plan,
                             ) = ai_signal
+                            # Store exit plan for decision history
+                            if ai_exit_plan:
+                                symbol_ai_exit_plans[symbol] = ai_exit_plan
                             logger.info(
                                 f"AI signal for {symbol}: {ai_action.value} {ai_trade_type.value} "
                                 f"(confidence: {ai_confidence}%)"
@@ -230,6 +242,7 @@ class AutoTradingAgent(BaseAgent):
                 self._cache_notification(session_id, portfolio_decision_msg)
 
                 # Phase 3: Execute approved trades
+                executed_trades_details = {}  # Store trade execution details for decision history
                 if portfolio_decision.trades_to_execute:
                     logger.info(
                         "\n" + "=" * 50 + "\n"
@@ -252,6 +265,13 @@ class AutoTradingAgent(BaseAgent):
                         trade_details = executor.execute_trade(
                             symbol, action, trade_type, asset_analysis.indicators
                         )
+
+                        # Store for decision history
+                        executed_trades_details[symbol] = {
+                            "trade_details": trade_details,
+                            "action": action,
+                            "trade_type": trade_type,
+                        }
 
                         if trade_details:
                             # Cache trade notification
@@ -289,6 +309,131 @@ class AutoTradingAgent(BaseAgent):
                 timestamp = unified_timestamp if unified_timestamp else datetime.now()
                 executor.snapshot_positions(timestamp)
                 executor.snapshot_portfolio(timestamp)
+                
+                # Collect decision history data for visualization
+                instance["check_count"] += 1
+                check_number = instance["check_count"]
+                
+                # Build decision history entry
+                decision_entry = {
+                    "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+                    "check_number": check_number,
+                    "symbol_decisions": [],
+                    "portfolio_decision": {
+                        "reasoning": portfolio_decision.reasoning,
+                        "trades_to_execute": [
+                            {
+                                "symbol": symbol,
+                                "action": action.value if hasattr(action, "value") else str(action),
+                                "trade_type": trade_type.value if hasattr(trade_type, "value") else str(trade_type),
+                            }
+                            for symbol, action, trade_type in portfolio_decision.trades_to_execute
+                        ],
+                        "trades_executed": [],
+                    },
+                }
+                
+                # Collect symbol-level decisions
+                for symbol, asset_analysis in portfolio_manager.asset_analyses.items():
+                    indicators = asset_analysis.indicators
+                    
+                    # Get current position if exists
+                    current_position = None
+                    if symbol in executor.positions:
+                        pos = executor.positions[symbol]
+                        try:
+                            import yfinance as yf
+                            ticker = yf.Ticker(symbol)
+                            current_price = float(ticker.history(period="1d", interval="1m")["Close"].iloc[-1])
+                            if pos.trade_type.value == "long":
+                                unrealized_pnl = (current_price - pos.entry_price) * abs(pos.quantity)
+                            else:
+                                unrealized_pnl = (pos.entry_price - current_price) * abs(pos.quantity)
+                            
+                            current_position = {
+                                "entry_price": float(pos.entry_price),
+                                "quantity": float(pos.quantity),
+                                "trade_type": pos.trade_type.value if hasattr(pos.trade_type, "value") else str(pos.trade_type),
+                                "unrealized_pnl": float(unrealized_pnl),
+                                "current_price": float(current_price),
+                            }
+                        except Exception:
+                            pass
+                    
+                    symbol_decision = {
+                        "symbol": symbol,
+                        "market_data": {
+                            "price": float(indicators.close_price),
+                            "volume": float(indicators.volume),
+                            "historical_prices": indicators.historical_prices[-20:] if indicators.historical_prices else None,  # Last 20 prices
+                            "historical_volumes": indicators.historical_volumes[-20:] if indicators.historical_volumes else None,  # Last 20 volumes
+                        },
+                        "technical_indicators": {
+                            "macd": float(indicators.macd) if indicators.macd is not None else None,
+                            "macd_signal": float(indicators.macd_signal) if indicators.macd_signal is not None else None,
+                            "macd_histogram": float(indicators.macd_histogram) if indicators.macd_histogram is not None else None,
+                            "rsi": float(indicators.rsi) if indicators.rsi is not None else None,
+                            "ema_12": float(indicators.ema_12) if indicators.ema_12 is not None else None,
+                            "ema_26": float(indicators.ema_26) if indicators.ema_26 is not None else None,
+                            "ema_50": float(indicators.ema_50) if indicators.ema_50 is not None else None,
+                            "bb_upper": float(indicators.bb_upper) if indicators.bb_upper is not None else None,
+                            "bb_middle": float(indicators.bb_middle) if indicators.bb_middle is not None else None,
+                            "bb_lower": float(indicators.bb_lower) if indicators.bb_lower is not None else None,
+                        },
+                        "technical_signal": {
+                            "action": asset_analysis.technical_action.value if hasattr(asset_analysis.technical_action, "value") else str(asset_analysis.technical_action),
+                            "trade_type": asset_analysis.technical_trade_type.value if hasattr(asset_analysis.technical_trade_type, "value") else str(asset_analysis.technical_trade_type),
+                        },
+                        "ai_analysis": None,
+                        "current_position": current_position,
+                    }
+                    
+                    # Add AI analysis if available
+                    if asset_analysis.ai_action:
+                        symbol_decision["ai_analysis"] = {
+                            "action": asset_analysis.ai_action.value if hasattr(asset_analysis.ai_action, "value") else str(asset_analysis.ai_action),
+                            "trade_type": asset_analysis.ai_trade_type.value if hasattr(asset_analysis.ai_trade_type, "value") else str(asset_analysis.ai_trade_type),
+                            "reasoning": asset_analysis.ai_reasoning,
+                            "confidence": float(asset_analysis.ai_confidence) if asset_analysis.ai_confidence is not None else None,
+                            "exit_plan": symbol_ai_exit_plans.get(symbol),
+                        }
+                    
+                    decision_entry["symbol_decisions"].append(symbol_decision)
+                
+                # Collect executed trades from execution details
+                executed_trades = []
+                for symbol, trade_info in executed_trades_details.items():
+                    trade_details = trade_info["trade_details"]
+                    action = trade_info["action"]
+                    trade_type = trade_info["trade_type"]
+                    
+                    executed_trades.append({
+                        "symbol": symbol,
+                        "action": action.value if hasattr(action, "value") else str(action),
+                        "trade_type": trade_type.value if hasattr(trade_type, "value") else str(trade_type),
+                        "executed": trade_details is not None,
+                        "execution_price": float(trade_details.price) if trade_details and hasattr(trade_details, "price") else None,
+                        "quantity": float(trade_details.quantity) if trade_details and hasattr(trade_details, "quantity") else None,
+                        "notional": float(trade_details.notional) if trade_details and hasattr(trade_details, "notional") else None,
+                    })
+                
+                decision_entry["portfolio_decision"]["trades_executed"] = executed_trades
+                
+                # Add portfolio state
+                decision_entry["portfolio_state"] = {
+                    "total_value": float(executor.get_portfolio_value()),
+                    "available_cash": float(executor.get_current_capital()),
+                    "positions_value": sum(
+                        float(pos.notional) for pos in executor.positions.values()
+                    ),
+                    "positions_count": len(executor.positions),
+                    "total_pnl": float(executor.get_portfolio_value() - config.initial_capital),
+                }
+                
+                # Save to decision history (keep last 500 entries)
+                instance["decision_history"].append(decision_entry)
+                if len(instance["decision_history"]) > 500:
+                    instance["decision_history"] = instance["decision_history"][-500:]
 
                 # Send portfolio update
                 portfolio_value = executor.get_portfolio_value()
@@ -471,20 +616,169 @@ class AutoTradingAgent(BaseAgent):
             return None
 
         try:
-            api_key = config.openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                logger.warning("OpenRouter API key not provided, AI signals disabled")
-                return None
-
-            llm_client = OpenRouter(
-                id=config.agent_model,
-                api_key=api_key,
-            )
+            from valuecell.utils.model import get_model
+            # 使用 get_model() 以支持 Qwen/DeepSeek
+            # 如果配置了特定模型，使用配置的模型；否则使用默认
+            if config.agent_model and config.agent_model != DEFAULT_AGENT_MODEL:
+                # 检查是否是 Qwen 或 DeepSeek 模型
+                if "qwen" in config.agent_model.lower():
+                    llm_client = get_model("TRADING_PARSER_MODEL_ID")
+                elif "deepseek" in config.agent_model.lower():
+                    llm_client = get_model("TRADING_PARSER_MODEL_ID")
+                else:
+                    # 使用 OpenRouter
+                    api_key = config.openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
+                    if not api_key:
+                        logger.warning("OpenRouter API key not provided, AI signals disabled")
+                        return None
+                    llm_client = OpenRouter(
+                        id=config.agent_model,
+                        api_key=api_key,
+                    )
+            else:
+                # 使用默认模型（通过 get_model 支持 Qwen/DeepSeek）
+                llm_client = get_model("TRADING_PARSER_MODEL_ID")
+            
             return AISignalGenerator(llm_client)
 
         except Exception as e:
             logger.error(f"Failed to initialize AI signal generator: {e}")
             return None
+
+    def _clean_for_json(self, obj):
+        """Recursively clean data for JSON serialization"""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {k: self._clean_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._clean_for_json(item) for item in obj]
+        elif hasattr(obj, '__dict__'):
+            return self._clean_for_json(obj.__dict__)
+        else:
+            return obj
+
+    def _get_position_history_data(self, executor: "TradingExecutor", positions: Dict[str, "Position"]) -> List[Dict]:
+        """Get position history data with current prices and PnL"""
+        import yfinance as yf
+        
+        position_list = []
+        for symbol, pos in positions.items():
+            try:
+                # Get current price
+                ticker = yf.Ticker(symbol)
+                data = ticker.history(period="1d", interval="1m")
+                if not data.empty:
+                    current_price = float(data["Close"].iloc[-1])
+                else:
+                    current_price = pos.entry_price
+            except Exception as e:
+                logger.debug(f"Failed to get current price for {symbol}, using entry_price: {e}")
+                current_price = pos.entry_price
+            
+            # Calculate unrealized PnL
+            try:
+                unrealized_pnl = executor._position_manager.calculate_position_pnl(pos, current_price)
+            except Exception:
+                unrealized_pnl = 0.0
+            
+            position_list.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": str(symbol),
+                "quantity": float(pos.quantity),
+                "entry_price": float(pos.entry_price),
+                "current_price": float(current_price),
+                "trade_type": pos.trade_type.value if hasattr(pos.trade_type, 'value') else str(pos.trade_type),
+                "unrealized_pnl": float(unrealized_pnl),
+                "notional": float(pos.notional),
+            })
+        
+        return position_list
+
+    def _save_trading_data_to_file(self):
+        """
+        Save all trading instances data to file for API access
+        This enables the monitoring dashboard to access trading data
+        """
+        try:
+            data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "instances": []
+            }
+            
+            for session_id, instances in self.trading_instances.items():
+                for instance_id, instance in instances.items():
+                    executor: TradingExecutor = instance["executor"]
+                    config: AutoTradingConfig = instance["config"]
+                    
+                    # Get current portfolio state
+                    portfolio_summary = executor.get_portfolio_summary()
+                    portfolio_history = executor.get_portfolio_history()
+                    trade_history = executor.get_trade_history()
+                    positions = executor.positions  # Use property, not method
+                    
+                    # Calculate current values
+                    total_value, positions_value, total_pnl = executor._position_manager.calculate_portfolio_value()
+                    
+                    instance_data = {
+                        "instance_id": instance_id,
+                        "session_id": session_id,
+                        "active": instance["active"],
+                        "created_at": (
+                            instance.get("created_at").isoformat() 
+                            if instance.get("created_at") and isinstance(instance.get("created_at"), datetime)
+                            else (instance.get("created_at") if isinstance(instance.get("created_at"), str) else datetime.now(timezone.utc).isoformat())
+                        ),
+                        "config": {
+                            "initial_capital": config.initial_capital,
+                            "crypto_symbols": config.crypto_symbols,
+                            "agent_model": config.agent_model,
+                            "use_ai_signals": config.use_ai_signals,
+                            "check_interval": config.check_interval,
+                            "risk_per_trade": config.risk_per_trade,
+                            "max_positions": config.max_positions,
+                        },
+                        "portfolio_history": [
+                            {
+                                "timestamp": (snapshot.timestamp.isoformat() if hasattr(snapshot.timestamp, "isoformat") and isinstance(snapshot.timestamp, datetime) else str(snapshot.timestamp)),
+                                "total_value": float(snapshot.total_value),
+                                "cash": float(snapshot.cash),
+                                "positions_value": float(snapshot.positions_value),
+                                "total_pnl": float(snapshot.total_pnl),
+                                "positions_count": int(snapshot.positions_count),
+                            }
+                            for snapshot in portfolio_history[-100:]  # Last 100 snapshots
+                        ],
+                        "trade_history": [
+                            {
+                                "timestamp": (trade.timestamp.isoformat() if hasattr(trade.timestamp, "isoformat") and isinstance(trade.timestamp, datetime) else str(trade.timestamp)),
+                                "symbol": str(trade.symbol),
+                                "action": trade.action if isinstance(trade.action, str) else str(trade.action),
+                                "trade_type": trade.trade_type if isinstance(trade.trade_type, str) else str(trade.trade_type),
+                                "price": float(trade.price),
+                                "quantity": float(trade.quantity),
+                                "notional": float(trade.notional),
+                                "pnl": float(trade.pnl) if hasattr(trade, 'pnl') and trade.pnl is not None else None,
+                            }
+                            for trade in trade_history[-50:]  # Last 50 trades
+                        ],
+                        "position_history": self._get_position_history_data(executor, positions),
+                        "decision_history": self._clean_for_json(instance.get("decision_history", []))[-100:],  # Last 100 decisions
+                    }
+                    
+                    data["instances"].append(instance_data)
+            
+            # Save to file
+            file_path = "/tmp/valuecell_trading_data.json"
+            # Clean all datetime objects before JSON serialization
+            cleaned_data = self._clean_for_json(data)
+            with open(file_path, "w") as f:
+                json.dump(cleaned_data, f, indent=2)
+            
+            logger.debug(f"Saved trading data for {len(data['instances'])} instances to {file_path}")
+        
+        except Exception as e:
+            logger.error(f"Failed to save trading data to file: {e}")
 
     def _get_instance_status_component_data(
         self, session_id: str, instance_id: str
@@ -896,6 +1190,7 @@ class AutoTradingAgent(BaseAgent):
                     "created_at": datetime.now(),
                     "check_count": 0,
                     "last_check": None,
+                    "decision_history": [],  # Store AI decision history for visualization
                 }
 
                 created_instances.append(instance_id)
@@ -949,6 +1244,9 @@ class AutoTradingAgent(BaseAgent):
                 # Cache the initial notification
                 self._cache_notification(session_id, initial_portfolio_msg)
 
+            # Save initial trading data to file
+            self._save_trading_data_to_file()
+            
             # Set check interval
             check_interval = DEFAULT_CHECK_INTERVAL
 
@@ -1027,6 +1325,9 @@ class AutoTradingAgent(BaseAgent):
                             component_id=f"portfolio_chart_{session_id}",
                         )
 
+                    # Save trading data to file for monitoring API
+                    self._save_trading_data_to_file()
+                    
                     # Wait for next check interval - only sleep once after processing all instances
                     logger.info(f"Waiting {check_interval}s until next check...")
                     await asyncio.sleep(check_interval)

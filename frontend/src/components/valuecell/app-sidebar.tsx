@@ -7,7 +7,7 @@ import {
 } from "react";
 import { NavLink, useLocation } from "react-router";
 import { useGetAgentList } from "@/api/agent";
-import { ChartBarVertical, Conversation, Logo, Setting } from "@/assets/svg";
+import { AutoTrade, ChartBarVertical, Conversation, Logo, Setting } from "@/assets/svg";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -148,7 +148,19 @@ const AppSidebar: FC = () => {
           label: "Market",
           to: "/market",
         },
-      ],
+          {
+            id: "trading-dashboard",
+            icon: AutoTrade,
+            label: "Trading Dashboard",
+            to: "/trading-dashboard",
+          },
+          {
+            id: "trading-config",
+            icon: Setting,
+            label: "Trading Config",
+            to: "/trading-config",
+          },
+        ],
       config: [
         {
           id: "setting",

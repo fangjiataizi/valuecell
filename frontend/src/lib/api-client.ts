@@ -29,7 +29,15 @@ export interface RequestConfig {
 export const getServerUrl = (endpoint: string) => {
   if (endpoint.startsWith("http")) return endpoint;
 
-  return `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1"}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+  // 使用相对路径访问后端 API，自动适配当前访问地址
+  // 如果设置了 VITE_API_BASE_URL 环境变量则使用该值
+  // ValueCell 后端运行在 8001 端口（8000 被其他服务占用）
+  const baseUrl = import.meta.env.VITE_API_BASE_URL ?? 
+    (typeof window !== 'undefined' 
+      ? `${window.location.protocol}//${window.location.hostname}:8001/api/v1`
+      : "http://localhost:8001/api/v1");
+  
+  return `${baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
 };
 
 class ApiClient {

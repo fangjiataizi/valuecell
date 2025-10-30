@@ -30,6 +30,26 @@ class TradeType(str, Enum):
     SHORT = "short"
 
 
+class ExitPlan(BaseModel):
+    """Exit plan for a trade - stop loss, take profit, and invalidation conditions"""
+
+    profit_target_pct: Optional[float] = Field(
+        None,
+        description="Take profit target as percentage (e.g., 2.5 means +2.5% from entry)",
+        gt=0,
+    )
+    stop_loss_pct: Optional[float] = Field(
+        None,
+        description="Stop loss as percentage (e.g., 1.5 means -1.5% from entry)",
+        gt=0,
+    )
+    invalidation_condition: Optional[str] = Field(
+        None,
+        description="Condition that invalidates the trade plan (e.g., 'RSI drops below 30', 'EMA20 breaks down')",
+        max_length=200,
+    )
+
+
 class TradingRequest(BaseModel):
     """Auto trading request model for parsing natural language queries"""
 
@@ -47,8 +67,8 @@ class TradingRequest(BaseModel):
         description="Whether to use AI-enhanced trading signals",
     )
     agent_models: Optional[List[str]] = Field(
-        default=[DEFAULT_AGENT_MODEL],
-        description="List of model IDs for trading decisions - one instance per model",
+        default=None,
+        description="List of model IDs for trading decisions - one instance per model. Must be specified.",
     )
 
     @field_validator("crypto_symbols")
@@ -60,6 +80,13 @@ class TradingRequest(BaseModel):
             raise ValueError(f"Maximum {MAX_SYMBOLS} symbols allowed")
         # Normalize symbols to uppercase
         return [s.upper() for s in v]
+    
+    @field_validator("agent_models")
+    @classmethod
+    def validate_agent_models(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError("At least one AI model must be specified")
+        return v
 
 
 class AutoTradingConfig(BaseModel):
@@ -150,6 +177,20 @@ class TechnicalIndicators(BaseModel):
     timestamp: datetime
     close_price: float
     volume: float
+    
+    # Historical data (ordered from oldest to newest)
+    historical_prices: Optional[List[float]] = Field(
+        default=None,
+        description="Historical close prices (oldest to newest, last is current)",
+        max_length=50,
+    )
+    historical_volumes: Optional[List[float]] = Field(
+        default=None,
+        description="Historical volumes (oldest to newest, last is current)",
+        max_length=50,
+    )
+    
+    # Technical indicators
     macd: Optional[float] = None
     macd_signal: Optional[float] = None
     macd_histogram: Optional[float] = None

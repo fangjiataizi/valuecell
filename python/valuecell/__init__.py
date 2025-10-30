@@ -102,3 +102,37 @@ def _load_env_file_manual() -> None:
 
 # Load environment variables immediately when package is imported
 load_env_file_early()
+
+
+# Apply Qwen/DeepSeek compatibility patch as early as possible
+# This ensures all OpenAI clients automatically convert 'developer' role to 'system'
+def _apply_compat_patch():
+    """Apply global compatibility patch for Qwen and DeepSeek models."""
+    try:
+        # Only apply if using Qwen or DeepSeek
+        if os.getenv("DASHSCOPE_API_KEY") or os.getenv("DEEPSEEK_API_KEY"):
+            # Import OpenAI first to ensure the class is loaded
+            import openai  # noqa
+            from valuecell.utils.compat_model import CompatibleOpenAIChat
+            
+            # Create a temporary instance to trigger global patch
+            api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("DEEPSEEK_API_KEY", "dummy")
+            base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1" if os.getenv("DASHSCOPE_API_KEY") else "https://api.deepseek.com"
+            
+            temp_model = CompatibleOpenAIChat(
+                id="qwen-plus" if os.getenv("DASHSCOPE_API_KEY") else "deepseek-chat",
+                api_key=api_key,
+                base_url=base_url
+            )
+            temp_model._apply_global_patch()
+            del temp_model
+            
+            if os.getenv("VALUECELL_DEBUG", "false").lower() == "true":
+                logger.info("✅ Global OpenAI compatibility patch applied")
+    except Exception as e:
+        if os.getenv("VALUECELL_DEBUG", "false").lower() == "true":
+            logger.warning(f"⚠️  Failed to apply compatibility patch: {e}")
+
+
+# Apply patch immediately when valuecell is imported
+_apply_compat_patch()

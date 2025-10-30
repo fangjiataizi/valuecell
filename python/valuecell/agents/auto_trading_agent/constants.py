@@ -8,4 +8,6 @@ DEFAULT_CHECK_INTERVAL = 60  # 1 minute in seconds
 DEFAULT_INITIAL_CAPITAL = 100000
 DEFAULT_RISK_PER_TRADE = 0.02
 DEFAULT_MAX_POSITIONS = 3
-DEFAULT_AGENT_MODEL = "deepseek/deepseek-v3.1-terminus"
+# Default model removed - must be explicitly specified in configuration
+# Previously: DEFAULT_AGENT_MODEL = "deepseek/deepseek-v3.1-terminus"
+DEFAULT_AGENT_MODEL = None

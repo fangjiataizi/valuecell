@@ -1,12 +1,14 @@
 """Market data and technical indicator retrieval - from a trader's perspective"""
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import pandas as pd
 import yfinance as yf
 
+from .binance_data import BinanceMarketDataProvider
 from .models import TechnicalIndicators
 
 logger = logging.getLogger(__name__)
@@ -22,19 +24,35 @@ class MarketDataProvider:
     3. "Is there enough volume for good execution?"
     """
 
-    def __init__(self, cache_ttl_seconds: int = 60):
+    def __init__(
+        self,
+        cache_ttl_seconds: int = 60,
+        preferred_source: Optional[str] = None,
+    ):
         """
         Initialize market data provider with optional caching.
 
         Args:
             cache_ttl_seconds: Time to live for cached data
+            preferred_source: Preferred data source ("binance" or "yfinance")
+                             If None, uses environment variable or defaults to "binance"
         """
         self.cache_ttl_seconds = cache_ttl_seconds
         self._cache: Dict[str, tuple] = {}  # {symbol: (data, timestamp)}
+        
+        # Determine preferred source
+        if preferred_source is None:
+            preferred_source = os.getenv("TRADING_DATA_SOURCE", "binance").lower()
+        
+        self.preferred_source = preferred_source
+        self.binance_provider = BinanceMarketDataProvider()
+        
+        logger.info(f"MarketDataProvider initialized with preferred source: {preferred_source}")
 
     def get_current_price(self, symbol: str) -> Optional[float]:
         """
         Get current market price for a symbol.
+        Tries Binance first, falls back to yfinance if needed.
 
         Args:
             symbol: Trading symbol (e.g., BTC-USD)
@@ -42,6 +60,16 @@ class MarketDataProvider:
         Returns:
             Current price or None if fetch fails
         """
+        # Try Binance first (if preferred)
+        if self.preferred_source == "binance":
+            try:
+                price = self.binance_provider.get_current_price(symbol)
+                if price is not None and price > 0:
+                    return price
+            except Exception as e:
+                logger.warning(f"Binance failed for {symbol}, trying yfinance: {e}")
+        
+        # Fallback to yfinance
         try:
             ticker = yf.Ticker(symbol)
             data = ticker.history(period="1d", interval="1m")
@@ -58,36 +86,67 @@ class MarketDataProvider:
     ) -> Optional[TechnicalIndicators]:
         """
         Calculate all technical indicators for a symbol.
+        Tries Binance first, falls back to yfinance if needed.
 
         Args:
             symbol: Trading symbol
             period: Data period (default: 5 days for intraday trading)
             interval: Data interval (default: 1 minute)
+                     For Binance: "1m", "5m", "15m", "1h", "1d", etc.
+                     For yfinance: "1m", "5m", "15m", "1h", "1d", etc.
 
         Returns:
             TechnicalIndicators object or None if calculation fails
         """
-        try:
-            # Fetch data from yfinance
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period=period, interval=interval)
-
-            if df.empty or len(df) < 50:
-                logger.warning(f"Insufficient data for {symbol}: {len(df)} bars")
+        df = None
+        
+        # Try Binance first (if preferred)
+        if self.preferred_source == "binance":
+            try:
+                # Map period to limit (approx)
+                # For 5d with 1m: 5 * 24 * 60 = 7200 bars (too many)
+                # Binance max is 1000, so we request last 1000 bars
+                limit = 1000
+                
+                # Map interval
+                binance_interval = interval  # Same format: "1m", "5m", etc.
+                
+                df = self.binance_provider.get_klines(
+                    symbol=symbol,
+                    interval=binance_interval,
+                    limit=limit,
+                )
+                
+                if df is not None and len(df) >= 50:
+                    logger.debug(f"Got {len(df)} bars from Binance for {symbol}")
+                else:
+                    df = None
+                    
+            except Exception as e:
+                logger.warning(f"Binance klines failed for {symbol}, trying yfinance: {e}")
+                df = None
+        
+        # Fallback to yfinance
+        if df is None:
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(period=period, interval=interval)
+            except Exception as e:
+                logger.error(f"Failed to fetch data from yfinance for {symbol}: {e}")
                 return None
 
-            # Calculate all indicators
-            self._calculate_moving_averages(df)
-            self._calculate_macd(df)
-            self._calculate_rsi(df)
-            self._calculate_bollinger_bands(df)
-
-            # Get latest values
-            return self._extract_latest_indicators(df, symbol)
-
-        except Exception as e:
-            logger.error(f"Failed to calculate indicators for {symbol}: {e}")
+        if df is None or df.empty or len(df) < 50:
+            logger.warning(f"Insufficient data for {symbol}: {len(df) if df is not None else 0} bars")
             return None
+
+        # Calculate all indicators
+        self._calculate_moving_averages(df)
+        self._calculate_macd(df)
+        self._calculate_rsi(df)
+        self._calculate_bollinger_bands(df)
+
+        # Get latest values
+        return self._extract_latest_indicators(df, symbol)
 
     @staticmethod
     def _calculate_moving_averages(df: pd.DataFrame):
@@ -136,11 +195,19 @@ class MarketDataProvider:
             """Safely convert to float, handling NaN"""
             return float(value) if pd.notna(value) else None
 
+        # Extract historical prices and volumes (last 20 bars)
+        # Ordered from oldest to newest (important for LLM understanding!)
+        hist_len = min(20, len(df))
+        historical_prices = df["Close"].tail(hist_len).tolist()
+        historical_volumes = df["Volume"].tail(hist_len).tolist()
+
         return TechnicalIndicators(
             symbol=symbol,
             timestamp=datetime.now(timezone.utc),
             close_price=float(latest["Close"]),
             volume=float(latest["Volume"]),
+            historical_prices=historical_prices,
+            historical_volumes=historical_volumes,
             macd=safe_float(latest.get("macd")),
             macd_signal=safe_float(latest.get("macd_signal")),
             macd_histogram=safe_float(latest.get("macd_histogram")),
